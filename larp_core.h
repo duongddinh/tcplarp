@@ -1,85 +1,137 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef LARP_CORE_H
 #define LARP_CORE_H
+
+/* The decision logic is shared with the native unit tests. Units: bytes/s, us. */
 #ifdef __KERNEL__
 #include <linux/types.h>
 #include <linux/math64.h>
 typedef u64 larp_u64;
 typedef u32 larp_u32;
-#define larp_div(a,b) div64_u64((a),(b))
+#define larp_div(a, b) div64_u64((a), (b))
 #else
 #include <stdint.h>
 typedef uint64_t larp_u64;
 typedef uint32_t larp_u32;
-#define larp_div(a,b) ((a)/(b))
+#define larp_div(a, b) ((a) / (b))
 #endif
 
-/* Units: bytes/s and monotonic microseconds. Shared with native regressions. */
 enum larp_mode { LARP_LAUNCH, LARP_RELAX, LARP_PROBE, LARP_PROBE_RTT };
 enum larp_recovery { LARP_OPEN, LARP_CWR, LARP_RECOVERY, LARP_RECOVERY_GROW, LARP_TIMEOUT };
-struct larp_model {
-    larp_u64 rate, ceiling, floor, delivery_rate, previous_delivery_rate;
-    larp_u64 filter_stamp_us, last_cut_us, last_probe_us, rtt_stamp_us;
-    larp_u64 probe_start_us, probe_base_rate, probe_before_rate, probe_peak_rate;
-    larp_u64 next_probe_us, refresh_start_us, low_flight_start_us;
-    larp_u32 min_rtt_us, last_rtt_us, delay_threshold_us, delay_reference_us;
-    larp_u32 learned, mode, have_cut, pending_congestion;
-    larp_u32 probe_active, probe_rtt_us, probe_min_rtt_us, probe_samples;
-    larp_u32 refresh_active, refresh_min_us, refresh_samples, rtt_window_us;
-};
-struct larp_feedback {
-    larp_u64 now_us, delivery_rate, sample_start_us;
-    larp_u32 rtt_us, inflight;
-    int ecn, loss, valid_delivery, app_limited, in_recovery, window_limited;
-};
-static inline larp_u64 larp_min(larp_u64 a, larp_u64 b) { return a < b ? a : b; }
-static inline larp_u64 larp_max(larp_u64 a, larp_u64 b) { return a > b ? a : b; }
-static inline larp_u64 larp_add(larp_u64 a, larp_u64 b)
-{ return a > ~(larp_u64)0-b ? ~(larp_u64)0 : a+b; }
-static inline larp_u64 larp_scale(larp_u64 a, larp_u32 n, larp_u32 d)
-{
-    larp_u64 whole=larp_div(a,d);
-    if (whole > larp_div(~(larp_u64)0,n)) return ~(larp_u64)0;
-    return larp_add(whole*n,larp_div((a%d)*n,d));
-}
-static inline void larp_start(struct larp_model *m, larp_u64 rate,
-    larp_u64 floor, larp_u32 rtt, larp_u32 threshold, larp_u64 now)
-{
-    *m=(struct larp_model){.rate=rate,.ceiling=rate,.floor=floor,
-        .min_rtt_us=rtt,.last_rtt_us=rtt,.delay_threshold_us=threshold,
-        .last_probe_us=now,.filter_stamp_us=now,.rtt_stamp_us=now,
-        .rtt_window_us=10000000,.mode=LARP_LAUNCH};
-}
-static inline void larp_cancel_probe(struct larp_model *m)
-{
-    if (m->probe_active) m->rate=m->probe_base_rate;
-    m->probe_active=0;
-}
-static inline void larp_update(struct larp_model *m, const struct larp_feedback *f)
-{
-    larp_u64 gap, span, bandwidth, next;
-    larp_u32 threshold;
-    int fresh, high, event;
-    if (f->rtt_us) m->last_rtt_us=f->rtt_us;
-    if (f->rtt_us && (!m->min_rtt_us || f->rtt_us<m->min_rtt_us)) {
-        m->min_rtt_us=f->rtt_us;
-        m->rtt_stamp_us=f->now_us;
-    }
-    gap=larp_max(m->min_rtt_us,1000);
-    threshold=(larp_u32)larp_max(m->delay_threshold_us,larp_div(gap,8));
-    fresh=f->valid_delivery && f->delivery_rate && f->rtt_us &&
-        !f->app_limited && !f->in_recovery;
-    if (fresh) m->learned=1;
-    if (f->ecn || f->loss) m->pending_congestion=1;
 
+struct larp_model {
+	larp_u64 rate, ceiling, floor, delivery_rate;
+	larp_u64 previous_delivery_rate, filter_stamp_us;
+	larp_u64 last_cut_us, last_probe_us;
+	larp_u32 min_rtt_us, delay_threshold_us;
+	larp_u32 mode, have_cut;
+	larp_u32 delay_reference_us;
+	larp_u32 learned;
+	larp_u32 last_rtt_us, pending_congestion, rtt_window_us;
+	larp_u32 refresh_active, refresh_min_us, refresh_samples;
+	larp_u64 rtt_stamp_us, refresh_start_us, low_flight_start_us;
+};
+
+struct larp_feedback {
+	larp_u64 now_us, delivery_rate, sample_start_us;
+	larp_u32 rtt_us, inflight;
+	int ecn, loss, valid_delivery, app_limited;
+	int in_recovery, window_limited;
+};
+
+static inline larp_u64 larp_min(larp_u64 a, larp_u64 b)
+{
+	return a < b ? a : b;
+}
+
+static inline larp_u64 larp_max(larp_u64 a, larp_u64 b)
+{
+	return a > b ? a : b;
+}
+
+static inline void larp_start(struct larp_model *m, larp_u64 rate,
+		larp_u64 floor, larp_u32 rtt_us, larp_u32 threshold_us,
+		larp_u64 now_us)
+{
+	*m = (struct larp_model) {
+		.rate = rate, .ceiling = rate, .floor = floor,
+		.min_rtt_us = rtt_us, .delay_threshold_us = threshold_us,
+		.last_probe_us = now_us, .mode = LARP_LAUNCH,
+		.filter_stamp_us = now_us,
+		.last_rtt_us = rtt_us, .rtt_stamp_us = now_us,
+		.rtt_window_us = 10000000,
+	};
+}
+
+/* Saturating arithmetic keeps unrestricted learned rates from wrapping. */
+static inline larp_u64 larp_add(larp_u64 a, larp_u64 b)
+{
+	return a > ~(larp_u64)0 - b ? ~(larp_u64)0 : a + b;
+}
+
+static inline larp_u64 larp_scale(larp_u64 a, larp_u32 numerator,
+		larp_u32 denominator)
+{
+	larp_u64 whole = larp_div(a, denominator);
+	if (whole > larp_div(~(larp_u64)0, numerator))
+		return ~(larp_u64)0;
+	return larp_add(whole * numerator,
+		larp_div((a % denominator) * numerator, denominator));
+}
+
+static inline void larp_update(struct larp_model *m,
+		const struct larp_feedback *f)
+{
+	larp_u64 next, gap, bandwidth, filter_span;
+	larp_u32 threshold;
+	int queue_high, delay_event;
+
+	if (f->rtt_us) m->last_rtt_us = f->rtt_us;
+	if (f->rtt_us && (!m->min_rtt_us || f->rtt_us < m->min_rtt_us)) {
+		m->min_rtt_us = f->rtt_us;
+		m->rtt_stamp_us = f->now_us;
+	}
+	if (f->ecn || f->loss) m->pending_congestion = 1;
+	gap = larp_max(m->min_rtt_us, 1000);
+	/* Keep the maximum over two two-RTT buckets. Startup/ACK gaps cannot
+	 * drag an EWMA downward, and obsolete capacity expires within four RTTs. */
+	filter_span = gap * 2;
+	if (f->in_recovery) {
+		/* Loss repair is sender/window limited. Preserve demonstrated
+		 * capacity instead of aging it into a recovery-limited rate. */
+		m->filter_stamp_us = f->now_us;
+	} else if (f->now_us - m->filter_stamp_us >= filter_span) {
+		m->previous_delivery_rate =
+			f->now_us - m->filter_stamp_us < filter_span * 2 ?
+			m->delivery_rate : 0;
+		m->delivery_rate = 0;
+		m->filter_stamp_us = f->now_us;
+	}
+	if (f->valid_delivery && f->delivery_rate && !f->app_limited)
+		m->delivery_rate = larp_max(m->delivery_rate, f->delivery_rate);
+	/* A measured sample grants permission to grow the flight budget; it
+	 * does not certify link capacity. Repair/app-limited samples cannot. */
+	if (f->valid_delivery && f->delivery_rate && f->rtt_us &&
+	    !f->app_limited && !f->in_recovery)
+		m->learned = 1;
+	bandwidth = larp_max(m->delivery_rate, m->previous_delivery_rate);
+	threshold = (larp_u32)larp_max(m->delay_threshold_us,
+					larp_div(m->min_rtt_us, 8));
+	queue_high = f->rtt_us && m->min_rtt_us &&
+		f->rtt_us > (larp_u64)m->min_rtt_us + threshold;
+	/* An unchanged standing queue is not a new queue-growth event on each
+	 * ACK. Rearm only after draining close to the baseline; further growth
+	 * of another threshold also warrants a new drain. The hysteresis keeps
+	 * RTT noise near the high threshold from repeatedly rearming cuts. */
+	if (f->rtt_us && f->rtt_us <= (larp_u64)m->min_rtt_us + threshold / 2)
+		m->delay_reference_us = 0;
     /* Explicit signals are latched across the once-per-base-RTT cut guard. */
     if (m->pending_congestion) {
-        larp_cancel_probe(m);
         if (!m->have_cut || f->now_us-m->last_cut_us>=gap) {
             m->rate=larp_max(m->floor,larp_scale(m->rate,7,10));
             m->last_cut_us=m->last_probe_us=f->now_us;
             m->have_cut=1; m->pending_congestion=0; m->mode=LARP_RELAX;
-            m->next_probe_us=larp_add(f->now_us,2*gap);
+            if (queue_high) m->delay_reference_us=f->rtt_us;
         }
         return;
     }
@@ -89,7 +141,6 @@ static inline void larp_update(struct larp_model *m, const struct larp_feedback 
     if (!m->refresh_active && m->learned && f->rtt_us &&
         !f->app_limited && !f->in_recovery &&
         f->now_us-m->rtt_stamp_us>=m->rtt_window_us) {
-        larp_cancel_probe(m);
         m->refresh_active=1; m->refresh_start_us=f->now_us;
         m->low_flight_start_us=0; m->refresh_min_us=0; m->refresh_samples=0;
     }
@@ -109,7 +160,6 @@ static inline void larp_update(struct larp_model *m, const struct larp_feedback 
             m->delay_reference_us=0;
             m->delivery_rate=m->previous_delivery_rate=0;
             m->filter_stamp_us=m->last_probe_us=f->now_us;
-            m->next_probe_us=larp_add(f->now_us,larp_max(m->min_rtt_us,1000));
         } else if (f->now_us-m->refresh_start_us>=
                    larp_max(2000000,(larp_u64)m->last_rtt_us*4)) {
             /* No usable low-flight evidence: retain the old baseline and
@@ -120,97 +170,85 @@ static inline void larp_update(struct larp_model *m, const struct larp_feedback 
         return;
     }
 
-    span=2*gap;
-    if (f->in_recovery) m->filter_stamp_us=f->now_us;
-    else if (f->now_us-m->filter_stamp_us>=span) {
-        m->previous_delivery_rate=f->now_us-m->filter_stamp_us<2*span ? m->delivery_rate:0;
-        m->delivery_rate=0; m->filter_stamp_us=f->now_us;
-    }
-    if (fresh) m->delivery_rate=larp_max(m->delivery_rate,f->delivery_rate);
-    bandwidth=larp_max(m->delivery_rate,m->previous_delivery_rate);
-    high=f->rtt_us && f->rtt_us>(larp_u64)m->min_rtt_us+threshold;
-    if (f->rtt_us && f->rtt_us<=(larp_u64)m->min_rtt_us+threshold/2)
-        m->delay_reference_us=0;
-    event=high && (!m->delay_reference_us ||
-        f->rtt_us>(larp_u64)m->delay_reference_us+threshold);
-    if (event) {
-        larp_cancel_probe(m);
-        if (!m->have_cut || f->now_us-m->last_cut_us>=gap) {
-            /* A peak from a previously monopolized share is not a cut floor. */
-            m->rate=larp_max(m->floor,larp_scale(m->rate,7,10));
-            m->last_cut_us=m->last_probe_us=f->now_us;
-            m->have_cut=1; m->mode=LARP_RELAX;
-            m->delay_reference_us=f->rtt_us;
-            m->next_probe_us=larp_add(f->now_us,2*gap);
-        }
-        return;
-    }
-    if (m->probe_active) {
-        /* Ignore samples spanning the launch/settling interval. This does
-         * not reconstruct individual packet identities; feedback is timed. */
-        if (fresh && f->sample_start_us>=m->probe_start_us+m->probe_rtt_us) {
-            m->probe_peak_rate=larp_max(m->probe_peak_rate,f->delivery_rate);
-            m->probe_min_rtt_us=m->probe_min_rtt_us ?
-                (larp_u32)larp_min(m->probe_min_rtt_us,f->rtt_us):f->rtt_us;
-            if (m->probe_samples<1000000) m->probe_samples++;
-        }
-        if (f->now_us-m->probe_start_us>=3*(larp_u64)m->probe_rtt_us) {
-            int keep=m->probe_samples>=3 &&
-                m->probe_peak_rate>=larp_scale(m->probe_before_rate,102,100) &&
-                m->probe_min_rtt_us<=(larp_u64)m->probe_rtt_us+threshold/2;
-            if (!keep) m->rate=m->probe_base_rate;
-            m->probe_active=0; m->last_probe_us=f->now_us;
-            m->next_probe_us=larp_add(f->now_us,(keep?4:8)*gap);
-            m->mode=keep?LARP_PROBE:LARP_RELAX;
-        }
-        return;
-    }
-    /* Missing RTT is unknown, not a clear queue. This gate applies to ALL
-     * rate increases, including those still below the initial guess. */
-    if (!fresh || f->now_us-m->last_probe_us<gap || f->now_us<m->next_probe_us)
-        return;
-    if (high) {
-        /* Reconcile a large request/delivery mismatch only with sustained
-         * congestion and no known congestion-window bottleneck. */
-        if (!f->window_limited && f->now_us-m->last_probe_us>=
-            2*(larp_u64)larp_max(f->rtt_us,1000) &&
-            f->delivery_rate<larp_scale(m->rate,4,5)) {
-            next=larp_max(larp_scale(m->rate,7,10),larp_scale(f->delivery_rate,105,100));
-            m->rate=larp_max(m->floor,larp_min(m->rate,next));
-            m->last_probe_us=f->now_us; m->mode=LARP_RELAX;
-            return;
-        }
-        /* One bounded 5% trial; no blind ladder back to R0. A useful stable
-         * delivery sample can support a trial ABOVE R0 despite elevated RTT. */
-        if (f->delivery_rate<larp_scale(m->rate,4,5)) return;
-        next=larp_min(larp_scale(m->rate,105,100),larp_scale(f->delivery_rate,110,100));
-        if (next<=m->rate) return;
-        m->probe_active=1; m->probe_start_us=f->now_us;
-        m->probe_base_rate=m->rate; m->probe_before_rate=f->delivery_rate;
-        m->probe_rtt_us=(larp_u32)larp_max(f->rtt_us,1000);
-        m->probe_peak_rate=0; m->probe_samples=0; m->probe_min_rtt_us=0;
-        m->rate=next; m->mode=LARP_PROBE;
-        return;
-    }
-    next=larp_max(larp_scale(m->rate,5,4),larp_scale(bandwidth,102,100));
-    m->rate=larp_min(next,larp_max(larp_max(m->ceiling,m->rate),larp_scale(bandwidth,5,4)));
-    m->last_probe_us=f->now_us; m->mode=LARP_PROBE;
+	delay_event = queue_high && (!m->delay_reference_us ||
+		f->rtt_us > (larp_u64)m->delay_reference_us + threshold);
+	/* A low delivered rate is not proof of congestion. Only a new queue
+	 * growth event, ECN, or loss can trigger a downward correction. */
+	if (delay_event) {
+		/* One reduction per base RTT prevents repeated ECE/queue feedback
+		 * from collapsing the rate on every ACK. The first cut is immediate. */
+		if (!m->have_cut || f->now_us - m->last_cut_us >= gap) {
+			next = larp_scale(m->rate, 7, 10);
+			/* A delay-only drain can retain a delivery-based floor. ECN
+			 * and loss must yield even when the recent peak is high: that
+			 * peak can reflect a previously monopolized bottleneck. */
+			if (bandwidth && !f->loss && !f->ecn)
+				next = larp_max(next, larp_scale(bandwidth, 9, 10));
+			next = larp_min(next, m->rate);
+			m->rate = larp_max(m->floor, next);
+			m->last_cut_us = f->now_us;
+			m->last_probe_us = f->now_us;
+			m->have_cut = 1;
+			m->mode = LARP_RELAX;
+			if (queue_high)
+				m->delay_reference_us = f->rtt_us;
+		}
+		return;
+	}
+	/* Unknown current RTT cannot authorize growth. */
+	if (f->rtt_us && f->now_us - m->last_probe_us >= gap && !f->app_limited && !f->in_recovery) {
+		/* Stable elevated RTT must not permanently disable probing. Probe
+		 * at 5% per RTT while queued, rather than making the fast 25%
+		 * recovery step or jumping back to a stale monopolistic peak. */
+		larp_u64 ceiling = m->ceiling;
+		next = larp_add(m->rate, larp_max(larp_div(m->rate, queue_high ? 20 : 4), 1));
+		if (bandwidth && !queue_high)
+			next = larp_max(next, larp_scale(bandwidth, 102, 100));
+		/* Above the launch guess, grow only with a current eligible sample
+		 * and low queue delay. Bound each extension by 1.25 times recent
+		 * delivery. This bound moves with feedback, not a fixed Gbps value.
+		 * A stale/small estimate must never silently cut the current rate. */
+		ceiling = larp_max(ceiling, m->rate);
+		if (m->learned && f->valid_delivery && f->delivery_rate && !queue_high)
+			ceiling = larp_max(ceiling, larp_scale(bandwidth, 5, 4));
+		m->rate = larp_min(ceiling, next);
+		m->last_probe_us = f->now_us;
+		m->mode = LARP_PROBE;
+	}
 }
-static inline larp_u32 larp_window(const struct larp_model *m, larp_u32 mss, larp_u32 cap)
+
+static inline larp_u32 larp_window(const struct larp_model *m,
+		larp_u32 mss, larp_u32 cap)
 {
-    larp_u64 bytes,packets;
-    if (m->refresh_active) return (larp_u32)larp_min(cap,4);
-    bytes=larp_scale(larp_scale(m->rate,2,1),larp_max(m->min_rtt_us,1000),1000000);
-    packets=larp_add(larp_div(bytes,mss),!!(bytes%mss));
-    return (larp_u32)larp_min(larp_max(packets,4),cap);
+	larp_u64 bytes, packets;
+	if (m->refresh_active) return (larp_u32)larp_min(cap, 4);
+	/* Saturate before multiplying at extreme rates/RTTs. */
+	bytes = larp_scale(larp_scale(m->rate, 2, 1),
+		larp_max(m->min_rtt_us, 1000), 1000000);
+	packets = larp_add(larp_div(bytes, mss), !!(bytes % mss));
+	return (larp_u32)larp_min(larp_max(packets, 4), cap);
 }
+
 static inline larp_u32 larp_ack_window(larp_u32 cwnd, larp_u32 target,
-    larp_u32 inflight, larp_u32 acked, larp_u32 ssthresh, enum larp_recovery recovery)
+		larp_u32 inflight, larp_u32 acked, larp_u32 ssthresh,
+		enum larp_recovery recovery)
 {
-    if (recovery==LARP_TIMEOUT) return (larp_u32)larp_max(1,larp_min(cwnd+acked,target));
-    if (recovery==LARP_RECOVERY) return (larp_u32)larp_min(target,larp_max(inflight+acked,2));
-    if (recovery==LARP_RECOVERY_GROW) return (larp_u32)larp_min(target,larp_max(cwnd+acked,inflight+acked));
-    if (recovery==LARP_CWR) return (larp_u32)larp_max(1,larp_min(larp_min(target,ssthresh),larp_max(cwnd,inflight+acked)));
-    return (larp_u32)larp_max(1,larp_min(target,cwnd+acked));
+	if (recovery == LARP_TIMEOUT)
+		/* TCP resets cwnd to one on RTO entry. Subsequent ACKs must
+		 * grow it again; freezing at one until Loss exits serializes
+		 * repair of the entire old flight at one packet per RTT. */
+		return (larp_u32)larp_max(1, larp_min(cwnd + acked, target));
+	if (recovery == LARP_RECOVERY)
+		/* Replace ACKed packets, even if earlier CWR/RTO left cwnd tiny.
+		 * A cong_control callback must perform packet conservation itself. */
+		return (larp_u32)larp_min(target, larp_max(inflight + acked, 2));
+	if (recovery == LARP_RECOVERY_GROW)
+		/* After the first recovery RTT, at most two replacements per ACK
+		 * allow repair to grow beyond a tiny packet-conservation window. */
+		return (larp_u32)larp_min(target, larp_max(cwnd + acked, inflight + acked));
+	if (recovery == LARP_CWR)
+		return (larp_u32)larp_max(1, larp_min(larp_min(target, ssthresh),
+				larp_max(cwnd, inflight + acked)));
+	return (larp_u32)larp_max(1, larp_min(target, cwnd + acked));
 }
 #endif
